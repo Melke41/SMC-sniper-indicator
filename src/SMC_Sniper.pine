@@ -1,5 +1,5 @@
 // ============================================================
-// SMC Sniper Indicator — v1.0
+// SMC Sniper Indicator — v1.0 (Fixed & Improved)
 // Multi-Timeframe: Daily + 4H + 1H + 30m → 15m entry
 // Strategy: CRT Sweep + DFVG + S&R + MSS + OB + Killzones
 // ============================================================
@@ -73,11 +73,11 @@ f_daily() =>
     dfvg_reject_bear = bear_sweep and d_active_bear_live and high >= d_active_bear_bot and close < d_active_bear_top
     dfvg_reject_bull = bull_sweep and d_active_bull_live and low <= d_active_bull_top and close > d_active_bull_bot
 
-    [bear_sweep, bull_sweep, dfvg_reject_bear, dfvg_reject_bull, d_active_bear_top, d_active_bear_bot, d_active_bear_live, d_active_bull_top, d_active_bull_bot, d_active_bull_live]
+    [bear_sweep, bull_sweep, dfvg_reject_bear, dfvg_reject_bull, d_active_bear_top, d_active_bear_bot, d_active_bear_live, d_active_bull_top, d_active_bull_bot, d_active_bull_live, prev_highs, prev_lows]
 
 f_daily_prev() =>
-    [bs, bl, rb, ru, bt, bb, b_live, ut, ub, u_live] = f_daily()
-    [bs[1], bl[1], rb[1], ru[1], bt[1], bb[1], b_live[1], ut[1], ub[1], u_live[1]]
+    [bs, bl, rb, ru, bt, bb, b_live, ut, ub, u_live, ph, pl] = f_daily()
+    [bs[1], bl[1], rb[1], ru[1], bt[1], bb[1], b_live[1], ut[1], ub[1], u_live[1], ph[1], pl[1]]
 
 // 2. 4-Hour timeframe calculations
 f_4h() =>
@@ -240,7 +240,7 @@ f_30m_prev() =>
     [ob_bear_t[1], ob_bear_b[1], ob_bear_l[1], ob_bull_t[1], ob_bull_b[1], ob_bull_l[1], mss_bear[1], mss_bull[1]]
 
 // ── GET SECURITY DATA (CONFIRMED BARS) ──────────────────────
-[d_bear_sweep, d_bull_sweep, d_reject_bear, d_reject_bull, d_bear_top, d_bear_bot, d_bear_live, d_bull_top, d_bull_bot, d_bull_live] = request.security(
+[d_bear_sweep, d_bull_sweep, d_reject_bear, d_reject_bull, d_bear_top, d_bear_bot, d_bear_live, d_bull_top, d_bull_bot, d_bull_live, d_prev_highs, d_prev_lows] = request.security(
      syminfo.tickerid, "D", f_daily_prev(), barmerge.gaps_off, barmerge.lookahead_off)
 
 [h4_fvg_bear_top, h4_fvg_bear_bot, h4_fvg_bear_live, h4_fvg_bull_top, h4_fvg_bull_bot, h4_fvg_bull_live,
@@ -256,12 +256,29 @@ f_30m_prev() =>
 
 // ── 15-MINUTE ENTRY TIMEFRAME CALCULATIONS ──────────────────
 
-// 1. Maintain Daily Bias state
+// 1. Maintain Daily Bias state with Invalidation Reset
 var int daily_bias = 0 // 1 = Bullish, -1 = Bearish, 0 = Neutral
+var float bear_sweep_level = na
+var float bull_sweep_level = na
+
 if d_bear_sweep
     daily_bias := -1
+    bear_sweep_level := d_prev_highs
+    bull_sweep_level := na
 else if d_bull_sweep
     daily_bias := 1
+    bull_sweep_level := d_prev_lows
+    bear_sweep_level := na
+
+// RESET: If price closes back ABOVE the bear sweep level = manipulation failed
+if daily_bias == -1 and not na(bear_sweep_level) and close > bear_sweep_level
+    daily_bias := 0
+    bear_sweep_level := na
+
+// RESET: If price closes back BELOW the bull sweep level = manipulation failed
+if daily_bias == 1 and not na(bull_sweep_level) and close < bull_sweep_level
+    daily_bias := 0
+    bull_sweep_level := na
 
 // 2. Track Daily DFVG Rejection
 var bool daily_reject_confirmed_bear = false
@@ -275,14 +292,13 @@ if d_bull_sweep
     daily_reject_confirmed_bear := false
 
 // 3. 4H/Daily Horizontal S&R Rejection
-is_at_res(p) => not na(p) and (high >= p * (1.0 - sr_threshold) and low <= p * (1.0 + sr_threshold))
-is_at_sup(p) => not na(p) and (high >= p * (1.0 - sr_threshold) and low <= p * (1.0 + sr_threshold))
+// Price approaching resistance FROM BELOW and rejecting
+is_near_res(p) => not na(p) and high >= p * (1.0 - sr_threshold) and low[1] < p
+sr_reject_bear = (is_near_res(h4_r0) or is_near_res(h4_r1) or is_near_res(h4_r2) or is_near_res(h4_r3) or is_near_res(h4_r4)) and close < open
 
-at_resistance = is_at_res(h4_r0) or is_at_res(h4_r1) or is_at_res(h4_r2) or is_at_res(h4_r3) or is_at_res(h4_r4)
-at_support    = is_at_sup(h4_s0) or is_at_sup(h4_s1) or is_at_sup(h4_s2) or is_at_sup(h4_s3) or is_at_sup(h4_s4)
-
-sr_reject_bear = at_resistance and close < open
-sr_reject_bull = at_support and close > open
+// Price approaching support FROM ABOVE and rejecting  
+is_near_sup(p) => not na(p) and low <= p * (1.0 + sr_threshold) and high[1] > p
+sr_reject_bull = (is_near_sup(h4_s0) or is_near_sup(h4_s1) or is_near_sup(h4_s2) or is_near_sup(h4_s3) or is_near_sup(h4_s4)) and close > open
 
 // 4. ICT Killzones Check (UTC)
 h_utc = hour(time, "UTC")
@@ -294,9 +310,9 @@ in_ny_am    = t_utc >= ny_am_start and t_utc < ny_am_end
 in_ny_pm    = t_utc >= ny_pm_start and t_utc < ny_pm_end
 in_killzone = in_london or in_ny_am or in_ny_pm
 
-// 5. 30m OB nested/overlapping inside 1H OB zone
-ob_bear_nested = h1_ob_bear_live and m30_ob_bear_live and m30_ob_bear_bot <= h1_ob_bear_top and m30_ob_bear_top >= h1_ob_bear_bot
-ob_bull_nested = h1_ob_bull_live and m30_ob_bull_live and m30_ob_bull_bot <= h1_ob_bull_top and m30_ob_bull_top >= h1_ob_bull_bot
+// 5. 30m OB nested/overlapping inside 1H OB zone with 30m MSS check
+ob_bear_nested = h1_ob_bear_live and m30_ob_bear_live and m30_mss_bear and m30_ob_bear_bot <= h1_ob_bear_top and m30_ob_bear_top >= h1_ob_bear_bot
+ob_bull_nested = h1_ob_bull_live and m30_ob_bull_live and m30_mss_bull and m30_ob_bull_bot <= h1_ob_bull_top and m30_ob_bull_top >= h1_ob_bull_bot
 
 // 6. Price tapping OB or DFVG zone
 taps_dfvg_bear      = d_bear_live and high >= d_bear_bot and low <= d_bear_top
@@ -559,15 +575,51 @@ plotshape(sr_reject_bear, title="Res Rejection Dot", style=shape.circle, locatio
 plotshape(sr_reject_bull, title="Sup Rejection Dot", style=shape.circle, location=location.belowbar, color=color.green, size=size.tiny)
 
 // 8. Info Dashboard (Top Right)
-var table dashboard = table.new(position.top_right, 2, 2, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+var table dashboard = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
 if barstate.islast
-    table.cell(dashboard, 0, 0, "SMC SNIPER", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black, 30))
     bias_text = daily_bias == -1 ? "BEARISH" : daily_bias == 1 ? "BULLISH" : "NEUTRAL"
     bias_color = daily_bias == -1 ? color.red : daily_bias == 1 ? color.green : color.gray
+    
+    table.cell(dashboard, 0, 0, "SMC SNIPER", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black, 30))
     table.cell(dashboard, 1, 0, "BIAS: " + bias_text, text_color=bias_color, text_size=size.small, bgcolor=color.new(color.black, 30))
 
-    table.cell(dashboard, 0, 1, "CONFLUENCE", text_color=color.white, text_size=size.small)
-    table.cell(dashboard, 1, 1, str.tostring(active_score) + "/8", text_color=active_score >= min_score ? color.green : color.orange, text_size=size.small)
+    // Check which points are active
+    c1 = daily_bias == -1 ? pt_bear_1 : daily_bias == 1 ? pt_bull_1 : 0
+    c2 = daily_bias == -1 ? pt_bear_2 : daily_bias == 1 ? pt_bull_2 : 0
+    c3 = daily_bias == -1 ? pt_bear_3 : daily_bias == 1 ? pt_bull_3 : 0
+    c4 = daily_bias == -1 ? pt_bear_4 : daily_bias == 1 ? pt_bull_4 : 0
+    c5 = daily_bias == -1 ? pt_bear_5 : daily_bias == 1 ? pt_bull_5 : 0
+    c6 = daily_bias == -1 ? pt_bear_6 : daily_bias == 1 ? pt_bull_6 : 0
+    c7 = daily_bias == -1 ? pt_bear_7 : daily_bias == 1 ? pt_bull_7 : 0
+    c8 = daily_bias == -1 ? pt_bear_8 : daily_bias == 1 ? pt_bull_8 : 0
+
+    table.cell(dashboard, 0, 1, "1. CRT Sweep", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 1, c1 == 1 ? "✓" : "✗", text_color=c1 == 1 ? color.green : color.gray, text_size=size.small)
+
+    table.cell(dashboard, 0, 2, "2. DFVG Reject", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 2, c2 == 1 ? "✓" : "✗", text_color=c2 == 1 ? color.green : color.gray, text_size=size.small)
+
+    table.cell(dashboard, 0, 3, "3. 4H FVG", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 3, c3 == 1 ? "✓" : "✗", text_color=c3 == 1 ? color.green : color.gray, text_size=size.small)
+
+    table.cell(dashboard, 0, 4, "4. S&R Reject", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 4, c4 == 1 ? "✓" : "✗", text_color=c4 == 1 ? color.green : color.gray, text_size=size.small)
+
+    table.cell(dashboard, 0, 5, "5. 1H MSS + OB", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 5, c5 == 1 ? "✓" : "✗", text_color=c5 == 1 ? color.green : color.gray, text_size=size.small)
+
+    table.cell(dashboard, 0, 6, "6. Killzone", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 6, c6 == 1 ? "✓" : "✗", text_color=c6 == 1 ? color.green : color.gray, text_size=size.small)
+
+    table.cell(dashboard, 0, 7, "7. Zone Tap", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 7, c7 == 1 ? "✓" : "✗", text_color=c7 == 1 ? color.green : color.gray, text_size=size.small)
+
+    table.cell(dashboard, 0, 8, "8. Reject Candle", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 8, c8 == 1 ? "✓" : "✗", text_color=c8 == 1 ? color.green : color.gray, text_size=size.small)
+
+    score_color = active_score >= min_score ? color.green : (active_score == 4 or active_score == 5) ? color.orange : color.red
+    table.cell(dashboard, 0, 9, "SCORE", text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(dashboard, 1, 9, str.tostring(active_score) + "/8", text_color=score_color, text_size=size.small, bgcolor=color.new(color.black, 30))
 
 // ── ALERTS ──────────────────────────────────────────────────
 plot(score_bear, "Bear Score", display=display.none)
@@ -576,7 +628,7 @@ plot(score_bull, "Bull Score", display=display.none)
 alertcondition(sell_signal, "SMC Sniper — SELL Signal", "SMC Sniper SELL Signal triggered! Score: {{plot_0}}/8")
 alertcondition(buy_signal, "SMC Sniper — BUY Signal", "SMC Sniper BUY Signal triggered! Score: {{plot_1}}/8")
 
-setup_forming = (daily_bias == -1 and score_bear == 5) or (daily_bias == 1 and score_bull == 5)
+setup_forming = (daily_bias == -1 and (score_bear == 4 or score_bear == 5)) or (daily_bias == 1 and (score_bull == 4 or score_bull == 5))
 alertcondition(setup_forming, "SMC Sniper — Setup Forming", "SMC Sniper Setup Forming. Watch the chart!")
 
 alertcondition(ta.change(daily_bias), "SMC Sniper — CRT Sweep Detected", "Daily CRT Sweep Detected! Bias changed.")
