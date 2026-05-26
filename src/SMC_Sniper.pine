@@ -1,0 +1,583 @@
+// ============================================================
+// SMC Sniper Indicator — v1.0
+// Multi-Timeframe: Daily + 4H + 1H + 30m → 15m entry
+// Strategy: CRT Sweep + DFVG + S&R + MSS + OB + Killzones
+// ============================================================
+
+//@version=5
+indicator("SMC Sniper Indicator", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ── USER INPUTS ─────────────────────────────────────────────
+crt_lookback         = input.int(5, "CRT Sweep Lookback (Daily)", minval=1)
+show_d_dfvg          = input.bool(true, "Show Daily DFVG Zone")
+show_4h_fvg          = input.bool(true, "Show 4H FVG Zone")
+show_sr_lines        = input.bool(true, "Show Major S&R Lines")
+sr_pivot_lookback    = input.int(10, "S&R Pivot Lookback (4H)", minval=1)
+sr_threshold_pct     = input.float(0.2, "S&R Touch Threshold %", minval=0.0, step=0.05)
+show_1h_ob           = input.bool(true, "Show 1H OB Zone")
+show_30m_ob          = input.bool(true, "Show 30m OB Zone")
+show_kz_bg           = input.bool(true, "Show Killzone Background")
+min_score            = input.int(6, "Min Score for Signal", minval=1, maxval=8)
+wick_ratio_threshold = input.float(0.6, "Rejection Wick Ratio", minval=0.1, maxval=0.9, step=0.05)
+
+london_start         = input.int(2, "London Start Hour (UTC)", minval=0, maxval=23)
+london_end           = input.int(5, "London End Hour (UTC)", minval=0, maxval=23)
+ny_am_start          = input.int(7, "NY AM Start Hour (UTC)", minval=0, maxval=23)
+ny_am_end            = input.int(10, "NY AM End Hour (UTC)", minval=0, maxval=23)
+ny_pm_start          = input.int(13, "NY PM Start Hour (UTC)", minval=0, maxval=23)
+ny_pm_end            = input.int(16, "NY PM End Hour (UTC)", minval=0, maxval=23)
+
+sr_threshold = sr_threshold_pct / 100.0
+
+// ── MULTI-TIMEFRAME CALCULATIONS ────────────────────────────
+
+// 1. Daily timeframe calculations
+f_daily() =>
+    var float d_active_bear_top = na
+    var float d_active_bear_bot = na
+    var bool d_active_bear_live = false
+
+    var float d_active_bull_top = na
+    var float d_active_bull_bot = na
+    var bool d_active_bull_live = false
+
+    // CRT Sweep
+    prev_highs = ta.highest(high[1], crt_lookback)
+    prev_lows  = ta.lowest(low[1], crt_lookback)
+
+    bear_sweep = high > prev_highs and close < prev_highs
+    bull_sweep = low < prev_lows and close > prev_lows
+
+    // DFVG (Fair Value Gap)
+    fvg_bear = high < low[2]
+    fvg_bull = low > high[2]
+
+    if fvg_bear
+        d_active_bear_top := low[2]
+        d_active_bear_bot := high
+        d_active_bear_live := true
+
+    if fvg_bull
+        d_active_bull_top := low
+        d_active_bull_bot := high[2]
+        d_active_bull_live := true
+
+    // Mitigation
+    if d_active_bear_live and close > d_active_bear_top
+        d_active_bear_live := false
+
+    if d_active_bull_live and close < d_active_bull_bot
+        d_active_bull_live := false
+
+    // Rejection of DFVG on sweep candle
+    dfvg_reject_bear = bear_sweep and d_active_bear_live and high >= d_active_bear_bot and close < d_active_bear_top
+    dfvg_reject_bull = bull_sweep and d_active_bull_live and low <= d_active_bull_top and close > d_active_bull_bot
+
+    [bear_sweep, bull_sweep, dfvg_reject_bear, dfvg_reject_bull, d_active_bear_top, d_active_bear_bot, d_active_bear_live, d_active_bull_top, d_active_bull_bot, d_active_bull_live]
+
+f_daily_prev() =>
+    [bs, bl, rb, ru, bt, bb, b_live, ut, ub, u_live] = f_daily()
+    [bs[1], bl[1], rb[1], ru[1], bt[1], bb[1], b_live[1], ut[1], ub[1], u_live[1]]
+
+// 2. 4-Hour timeframe calculations
+f_4h() =>
+    var float fvg_bear_top = na
+    var float fvg_bear_bot = na
+    var bool fvg_bear_live = false
+
+    var float fvg_bull_top = na
+    var float fvg_bull_bot = na
+    var bool fvg_bull_live = false
+
+    fvg_bear = high < low[2]
+    fvg_bull = low > high[2]
+
+    if fvg_bear
+        fvg_bear_top := low[2]
+        fvg_bear_bot := high
+        fvg_bear_live := true
+
+    if fvg_bull
+        fvg_bull_top := low
+        fvg_bull_bot := high[2]
+        fvg_bull_live := true
+
+    if fvg_bear_live and close > fvg_bear_top
+        fvg_bear_live := false
+
+    if fvg_bull_live and close < fvg_bull_bot
+        fvg_bull_live := false
+
+    // Major S&R levels
+    ph = ta.pivothigh(high, sr_pivot_lookback, sr_pivot_lookback)
+    pl = ta.pivotlow(low, sr_pivot_lookback, sr_pivot_lookback)
+
+    var float[] r_levels = array.new_float(5, na)
+    var float[] s_levels = array.new_float(5, na)
+
+    if not na(ph)
+        array.unshift(r_levels, ph)
+        array.pop(r_levels)
+
+    if not na(pl)
+        array.unshift(s_levels, pl)
+        array.pop(s_levels)
+
+    [fvg_bear_top, fvg_bear_bot, fvg_bear_live, fvg_bull_top, fvg_bull_bot, fvg_bull_live,
+     array.get(r_levels, 0), array.get(r_levels, 1), array.get(r_levels, 2), array.get(r_levels, 3), array.get(r_levels, 4),
+     array.get(s_levels, 0), array.get(s_levels, 1), array.get(s_levels, 2), array.get(s_levels, 3), array.get(s_levels, 4)]
+
+f_4h_prev() =>
+    [fvg_bear_t, fvg_bear_b, fvg_bear_l, fvg_bull_t, fvg_bull_b, fvg_bull_l,
+     r0, r1, r2, r3, r4, s0, s1, s2, s3, s4] = f_4h()
+    [fvg_bear_t[1], fvg_bear_b[1], fvg_bear_l[1], fvg_bull_t[1], fvg_bull_b[1], fvg_bull_l[1],
+     r0[1], r1[1], r2[1], r3[1], r4[1], s0[1], s1[1], s2[1], s3[1], s4[1]]
+
+// 3. 1-Hour timeframe calculations
+f_1h() =>
+    var float hl = na
+    var float lh = na
+
+    pl = ta.pivotlow(low, 5, 5)
+    ph = ta.pivothigh(high, 5, 5)
+
+    if not na(pl)
+        hl := pl
+    if not na(ph)
+        lh := ph
+
+    var float ob_bear_top = na
+    var float ob_bear_bot = na
+    var bool ob_bear_live = false
+
+    var float ob_bull_top = na
+    var float ob_bull_bot = na
+    var bool ob_bull_live = false
+
+    mss_bear = false
+    mss_bull = false
+
+    if not na(hl) and close < hl and close[1] >= hl
+        mss_bear := true
+        for i = 1 to 15
+            if close[i] > open[i]
+                ob_bear_top := high[i]
+                ob_bear_bot := low[i]
+                ob_bear_live := true
+                break
+
+    if not na(lh) and close > lh and close[1] <= lh
+        mss_bull := true
+        for i = 1 to 15
+            if close[i] < open[i]
+                ob_bull_top := high[i]
+                ob_bull_bot := low[i]
+                ob_bull_live := true
+                break
+
+    if ob_bear_live and close > ob_bear_top
+        ob_bear_live := false
+    if ob_bull_live and close < ob_bull_bot
+        ob_bull_live := false
+
+    [ob_bear_top, ob_bear_bot, ob_bear_live, ob_bull_top, ob_bull_bot, ob_bull_live, mss_bear, mss_bull]
+
+f_1h_prev() =>
+    [ob_bear_t, ob_bear_b, ob_bear_l, ob_bull_t, ob_bull_b, ob_bull_l, mss_bear, mss_bull] = f_1h()
+    [ob_bear_t[1], ob_bear_b[1], ob_bear_l[1], ob_bull_t[1], ob_bull_b[1], ob_bull_l[1], mss_bear[1], mss_bull[1]]
+
+// 4. 30-Minute timeframe calculations
+f_30m() =>
+    var float hl = na
+    var float lh = na
+
+    pl = ta.pivotlow(low, 5, 5)
+    ph = ta.pivothigh(high, 5, 5)
+
+    if not na(pl)
+        hl := pl
+    if not na(ph)
+        lh := ph
+
+    var float ob_bear_top = na
+    var float ob_bear_bot = na
+    var bool ob_bear_live = false
+
+    var float ob_bull_top = na
+    var float ob_bull_bot = na
+    var bool ob_bull_live = false
+
+    mss_bear = false
+    mss_bull = false
+
+    if not na(hl) and close < hl and close[1] >= hl
+        mss_bear := true
+        for i = 1 to 15
+            if close[i] > open[i]
+                ob_bear_top := high[i]
+                ob_bear_bot := low[i]
+                ob_bear_live := true
+                break
+
+    if not na(lh) and close > lh and close[1] <= lh
+        mss_bull := true
+        for i = 1 to 15
+            if close[i] < open[i]
+                ob_bull_top := high[i]
+                ob_bull_bot := low[i]
+                ob_bull_live := true
+                break
+
+    if ob_bear_live and close > ob_bear_top
+        ob_bear_live := false
+    if ob_bull_live and close < ob_bull_bot
+        ob_bull_live := false
+
+    [ob_bear_top, ob_bear_bot, ob_bear_live, ob_bull_top, ob_bull_bot, ob_bull_live, mss_bear, mss_bull]
+
+f_30m_prev() =>
+    [ob_bear_t, ob_bear_b, ob_bear_l, ob_bull_t, ob_bull_b, ob_bull_l, mss_bear, mss_bull] = f_30m()
+    [ob_bear_t[1], ob_bear_b[1], ob_bear_l[1], ob_bull_t[1], ob_bull_b[1], ob_bull_l[1], mss_bear[1], mss_bull[1]]
+
+// ── GET SECURITY DATA (CONFIRMED BARS) ──────────────────────
+[d_bear_sweep, d_bull_sweep, d_reject_bear, d_reject_bull, d_bear_top, d_bear_bot, d_bear_live, d_bull_top, d_bull_bot, d_bull_live] = request.security(
+     syminfo.tickerid, "D", f_daily_prev(), barmerge.gaps_off, barmerge.lookahead_off)
+
+[h4_fvg_bear_top, h4_fvg_bear_bot, h4_fvg_bear_live, h4_fvg_bull_top, h4_fvg_bull_bot, h4_fvg_bull_live,
+ h4_r0, h4_r1, h4_r2, h4_r3, h4_r4, h4_s0, h4_s1, h4_s2, h4_s3, h4_s4] = request.security(
+      syminfo.tickerid, "240", f_4h_prev(), barmerge.gaps_off, barmerge.lookahead_off)
+
+[h1_ob_bear_top, h1_ob_bear_bot, h1_ob_bear_live, h1_ob_bull_top, h1_ob_bull_bot, h1_ob_bull_live, h1_mss_bear, h1_mss_bull] = request.security(
+     syminfo.tickerid, "60", f_1h_prev(), barmerge.gaps_off, barmerge.lookahead_off)
+
+[m30_ob_bear_top, m30_ob_bear_bot, m30_ob_bear_live, m30_ob_bull_top, m30_ob_bull_bot, m30_ob_bull_live, m30_mss_bear, m30_mss_bull] = request.security(
+     syminfo.tickerid, "30", f_30m_prev(), barmerge.gaps_off, barmerge.lookahead_off)
+
+
+// ── 15-MINUTE ENTRY TIMEFRAME CALCULATIONS ──────────────────
+
+// 1. Maintain Daily Bias state
+var int daily_bias = 0 // 1 = Bullish, -1 = Bearish, 0 = Neutral
+if d_bear_sweep
+    daily_bias := -1
+else if d_bull_sweep
+    daily_bias := 1
+
+// 2. Track Daily DFVG Rejection
+var bool daily_reject_confirmed_bear = false
+var bool daily_reject_confirmed_bull = false
+
+if d_bear_sweep
+    daily_reject_confirmed_bear := d_reject_bear
+    daily_reject_confirmed_bull := false
+if d_bull_sweep
+    daily_reject_confirmed_bull := d_reject_bull
+    daily_reject_confirmed_bear := false
+
+// 3. 4H/Daily Horizontal S&R Rejection
+is_at_res(p) => not na(p) and (high >= p * (1.0 - sr_threshold) and low <= p * (1.0 + sr_threshold))
+is_at_sup(p) => not na(p) and (high >= p * (1.0 - sr_threshold) and low <= p * (1.0 + sr_threshold))
+
+at_resistance = is_at_res(h4_r0) or is_at_res(h4_r1) or is_at_res(h4_r2) or is_at_res(h4_r3) or is_at_res(h4_r4)
+at_support    = is_at_sup(h4_s0) or is_at_sup(h4_s1) or is_at_sup(h4_s2) or is_at_sup(h4_s3) or is_at_sup(h4_s4)
+
+sr_reject_bear = at_resistance and close < open
+sr_reject_bull = at_support and close > open
+
+// 4. ICT Killzones Check (UTC)
+h_utc = hour(time, "UTC")
+m_utc = minute(time, "UTC")
+t_utc = h_utc + m_utc / 60.0
+
+in_london   = t_utc >= london_start and t_utc < london_end
+in_ny_am    = t_utc >= ny_am_start and t_utc < ny_am_end
+in_ny_pm    = t_utc >= ny_pm_start and t_utc < ny_pm_end
+in_killzone = in_london or in_ny_am or in_ny_pm
+
+// 5. 30m OB nested/overlapping inside 1H OB zone
+ob_bear_nested = h1_ob_bear_live and m30_ob_bear_live and m30_ob_bear_bot <= h1_ob_bear_top and m30_ob_bear_top >= h1_ob_bear_bot
+ob_bull_nested = h1_ob_bull_live and m30_ob_bull_live and m30_ob_bull_bot <= h1_ob_bull_top and m30_ob_bull_top >= h1_ob_bull_bot
+
+// 6. Price tapping OB or DFVG zone
+taps_dfvg_bear      = d_bear_live and high >= d_bear_bot and low <= d_bear_top
+taps_nested_ob_bear = ob_bear_nested and high >= m30_ob_bear_bot and low <= m30_ob_bear_top
+taps_bear_zone      = taps_dfvg_bear or taps_nested_ob_bear
+
+taps_dfvg_bull      = d_bull_live and low <= d_bull_top and high >= d_bull_bot
+taps_nested_ob_bull = ob_bull_nested and low <= m30_ob_bull_top and high >= m30_ob_bull_bot
+taps_bull_zone      = taps_dfvg_bull or taps_nested_ob_bull
+
+// 7. 15m Rejection Candle Check
+rng = high - low
+upper_wick = high - math.max(open, close)
+lower_wick = math.min(open, close) - low
+
+rejection_candle_bear = rng > 0 and ((upper_wick / rng >= wick_ratio_threshold) or (close < open and open[1] < close[1] and close <= open[1] and open >= close[1]))
+rejection_candle_bull = rng > 0 and ((lower_wick / rng >= wick_ratio_threshold) or (close > open and open[1] > close[1] and close >= open[1] and open <= close[1]))
+
+// ── CONFLUENCE SCORE (8 POINTS) ─────────────────────────────
+
+// Bearish Score components
+pt_bear_1 = daily_bias == -1 ? 1 : 0
+pt_bear_2 = daily_reject_confirmed_bear ? 1 : 0
+pt_bear_3 = h4_fvg_bear_live ? 1 : 0
+pt_bear_4 = sr_reject_bear ? 1 : 0
+pt_bear_5 = h1_ob_bear_live ? 1 : 0
+pt_bear_6 = in_killzone ? 1 : 0
+pt_bear_7 = taps_bear_zone ? 1 : 0
+pt_bear_8 = rejection_candle_bear ? 1 : 0
+score_bear = pt_bear_1 + pt_bear_2 + pt_bear_3 + pt_bear_4 + pt_bear_5 + pt_bear_6 + pt_bear_7 + pt_bear_8
+
+// Bullish Score components
+pt_bull_1 = daily_bias == 1 ? 1 : 0
+pt_bull_2 = daily_reject_confirmed_bull ? 1 : 0
+pt_bull_3 = h4_fvg_bull_live ? 1 : 0
+pt_bull_4 = sr_reject_bull ? 1 : 0
+pt_bull_5 = h1_ob_bull_live ? 1 : 0
+pt_bull_6 = in_killzone ? 1 : 0
+pt_bull_7 = taps_bull_zone ? 1 : 0
+pt_bull_8 = rejection_candle_bull ? 1 : 0
+score_bull = pt_bull_1 + pt_bull_2 + pt_bull_3 + pt_bull_4 + pt_bull_5 + pt_bull_6 + pt_bull_7 + pt_bull_8
+
+active_score = daily_bias == -1 ? score_bear : daily_bias == 1 ? score_bull : 0
+
+// ── SIGNALS & TRIGGERING ────────────────────────────────────
+
+var bool trade_taken_today = false
+if ta.change(time("D"))
+    trade_taken_today := false
+
+sell_signal = daily_bias == -1 and score_bear >= min_score and in_killzone and not trade_taken_today and rejection_candle_bear
+buy_signal  = daily_bias ==  1 and score_bull >= min_score and in_killzone and not trade_taken_today and rejection_candle_bull
+
+if sell_signal
+    label.new(bar_index, high, text="▼ " + str.tostring(score_bear) + "/8 SELL", color=color.red, textcolor=color.white, style=label.style_label_down, size=size.normal)
+    trade_taken_today := true
+
+if buy_signal
+    label.new(bar_index, low, text="▲ " + str.tostring(score_bull) + "/8 BUY", color=color.green, textcolor=color.white, style=label.style_label_up, size=size.normal)
+    trade_taken_today := true
+
+
+// ── VISUAL RENDERING ON CHART ───────────────────────────────
+
+// 1. Daily DFVG Zone
+var box d_dfvg_box = na
+var int d_dfvg_left = na
+if ta.change(d_bear_bot) or ta.change(d_bear_top) or ta.change(d_bull_bot) or ta.change(d_bull_top)
+    d_dfvg_left := bar_index
+    if not na(d_dfvg_box)
+        box.delete(d_dfvg_box)
+        d_dfvg_box := na
+
+if show_d_dfvg
+    if daily_bias == -1 and d_bear_live and not na(d_bear_top)
+        if na(d_dfvg_box)
+            d_dfvg_box := box.new(left=d_dfvg_left, top=d_bear_top, right=bar_index, bottom=d_bear_bot, border_color=color.red, border_style=line.style_dashed, bgcolor=color.new(color.red, 95))
+        else
+            box.set_right(d_dfvg_box, bar_index)
+            box.set_top(d_dfvg_box, d_bear_top)
+            box.set_bottom(d_dfvg_box, d_bear_bot)
+    else if daily_bias == 1 and d_bull_live and not na(d_bull_top)
+        if na(d_dfvg_box)
+            d_dfvg_box := box.new(left=d_dfvg_left, top=d_bull_top, right=bar_index, bottom=d_bull_bot, border_color=color.blue, border_style=line.style_dashed, bgcolor=color.new(color.blue, 95))
+        else
+            box.set_right(d_dfvg_box, bar_index)
+            box.set_top(d_dfvg_box, d_bull_top)
+            box.set_bottom(d_dfvg_box, d_bull_bot)
+    else
+        if not na(d_dfvg_box)
+            box.delete(d_dfvg_box)
+            d_dfvg_box := na
+
+// 2. 4H FVG Zone
+var box h4_fvg_box = na
+var int h4_fvg_left = na
+if ta.change(h4_fvg_bear_bot) or ta.change(h4_fvg_bear_top) or ta.change(h4_fvg_bull_bot) or ta.change(h4_fvg_bull_top)
+    h4_fvg_left := bar_index
+    if not na(h4_fvg_box)
+        box.delete(h4_fvg_box)
+        h4_fvg_box := na
+
+if show_4h_fvg
+    if daily_bias == -1 and h4_fvg_bear_live and not na(h4_fvg_bear_top)
+        if na(h4_fvg_box)
+            h4_fvg_box := box.new(left=h4_fvg_left, top=h4_fvg_bear_top, right=bar_index, bottom=h4_fvg_bear_bot, border_color=color.orange, border_style=line.style_solid, bgcolor=color.new(color.orange, 95))
+        else
+            box.set_right(h4_fvg_box, bar_index)
+            box.set_top(h4_fvg_box, h4_fvg_bear_top)
+            box.set_bottom(h4_fvg_box, h4_fvg_bear_bot)
+    else if daily_bias == 1 and h4_fvg_bull_live and not na(h4_fvg_bull_top)
+        if na(h4_fvg_box)
+            h4_fvg_box := box.new(left=h4_fvg_left, top=h4_fvg_bull_top, right=bar_index, bottom=h4_fvg_bull_bot, border_color=color.orange, border_style=line.style_solid, bgcolor=color.new(color.orange, 95))
+        else
+            box.set_right(h4_fvg_box, bar_index)
+            box.set_top(h4_fvg_box, h4_fvg_bull_top)
+            box.set_bottom(h4_fvg_box, h4_fvg_bull_bot)
+    else
+        if not na(h4_fvg_box)
+            box.delete(h4_fvg_box)
+            h4_fvg_box := na
+
+// 3. 1H OB Zone
+var box h1_ob_box = na
+var int h1_ob_left = na
+if ta.change(h1_ob_bear_bot) or ta.change(h1_ob_bear_top) or ta.change(h1_ob_bull_bot) or ta.change(h1_ob_bull_top)
+    h1_ob_left := bar_index
+    if not na(h1_ob_box)
+        box.delete(h1_ob_box)
+        h1_ob_box := na
+
+if show_1h_ob
+    if daily_bias == -1 and h1_ob_bear_live and not na(h1_ob_bear_top)
+        if na(h1_ob_box)
+            h1_ob_box := box.new(left=h1_ob_left, top=h1_ob_bear_top, right=bar_index, bottom=h1_ob_bear_bot, border_color=color.red, border_style=line.style_solid, bgcolor=color.new(color.red, 95), text="1H OB", text_color=color.red, text_size=size.small, text_valign=text.valign_bottom, text_halign=text.halign_left)
+        else
+            box.set_right(h1_ob_box, bar_index)
+            box.set_top(h1_ob_box, h1_ob_bear_top)
+            box.set_bottom(h1_ob_box, h1_ob_bear_bot)
+    else if daily_bias == 1 and h1_ob_bull_live and not na(h1_ob_bull_top)
+        if na(h1_ob_box)
+            h1_ob_box := box.new(left=h1_ob_left, top=h1_ob_bull_top, right=bar_index, bottom=h1_ob_bull_bot, border_color=color.blue, border_style=line.style_solid, bgcolor=color.new(color.blue, 95), text="1H OB", text_color=color.blue, text_size=size.small, text_valign=text.valign_bottom, text_halign=text.halign_left)
+        else
+            box.set_right(h1_ob_box, bar_index)
+            box.set_top(h1_ob_box, h1_ob_bull_top)
+            box.set_bottom(h1_ob_box, h1_ob_bull_bot)
+    else
+        if not na(h1_ob_box)
+            box.delete(h1_ob_box)
+            h1_ob_box := na
+
+// 4. 30m OB Zone
+var box m30_ob_box = na
+var int m30_ob_left = na
+if ta.change(m30_ob_bear_bot) or ta.change(m30_ob_bear_top) or ta.change(m30_ob_bull_bot) or ta.change(m30_ob_bull_top)
+    m30_ob_left := bar_index
+    if not na(m30_ob_box)
+        box.delete(m30_ob_box)
+        m30_ob_box := na
+
+if show_30m_ob
+    if daily_bias == -1 and m30_ob_bear_live and not na(m30_ob_bear_top)
+        if na(m30_ob_box)
+            m30_ob_box := box.new(left=m30_ob_left, top=m30_ob_bear_top, right=bar_index, bottom=m30_ob_bear_bot, border_color=color.red, border_style=line.style_solid, bgcolor=color.new(color.red, 90), text="30m OB", text_color=color.red, text_size=size.small, text_valign=text.valign_top, text_halign=text.halign_left)
+        else
+            box.set_right(m30_ob_box, bar_index)
+            box.set_top(m30_ob_box, m30_ob_bear_top)
+            box.set_bottom(m30_ob_box, m30_ob_bear_bot)
+    else if daily_bias == 1 and m30_ob_bull_live and not na(m30_ob_bull_top)
+        if na(m30_ob_box)
+            m30_ob_box := box.new(left=m30_ob_left, top=m30_ob_bull_top, right=bar_index, bottom=m30_ob_bull_bot, border_color=color.blue, border_style=line.style_solid, bgcolor=color.new(color.blue, 90), text="30m OB", text_color=color.blue, text_size=size.small, text_valign=text.valign_top, text_halign=text.halign_left)
+        else
+            box.set_right(m30_ob_box, bar_index)
+            box.set_top(m30_ob_box, m30_ob_bull_top)
+            box.set_bottom(m30_ob_box, m30_ob_bull_bot)
+    else
+        if not na(m30_ob_box)
+            box.delete(m30_ob_box)
+            m30_ob_box := na
+
+// 5. Major S&R lines
+var line[] r_lines = array.new_line(5)
+var line[] s_lines = array.new_line(5)
+var label[] r_labels = array.new_label(5)
+var label[] s_labels = array.new_label(5)
+
+if barstate.isfirst
+    for i = 0 to 4
+        array.set(r_lines, i, line.new(na, na, na, na, xloc=xloc.bar_index))
+        array.set(s_lines, i, line.new(na, na, na, na, xloc=xloc.bar_index))
+        array.set(r_labels, i, label.new(na, na, "", xloc=xloc.bar_index))
+        array.set(s_labels, i, label.new(na, na, "", xloc=xloc.bar_index))
+
+if show_sr_lines
+    r_vals = array.new_float(0)
+    array.push(r_vals, h4_r0)
+    array.push(r_vals, h4_r1)
+    array.push(r_vals, h4_r2)
+    array.push(r_vals, h4_r3)
+    array.push(r_vals, h4_r4)
+
+    s_vals = array.new_float(0)
+    array.push(s_vals, h4_s0)
+    array.push(s_vals, h4_s1)
+    array.push(s_vals, h4_s2)
+    array.push(s_vals, h4_s3)
+    array.push(s_vals, h4_s4)
+
+    for i = 0 to 4
+        rv = array.get(r_vals, i)
+        sv = array.get(s_vals, i)
+
+        rl = array.get(r_lines, i)
+        sl = array.get(s_lines, i)
+        rlab = array.get(r_labels, i)
+        slab = array.get(s_labels, i)
+
+        if not na(rv)
+            line.set_xy1(rl, bar_index - 50, rv)
+            line.set_xy2(rl, bar_index + 10, rv)
+            line.set_color(rl, color.new(color.red, 30))
+            line.set_style(rl, line.style_solid)
+            line.set_width(rl, 1)
+
+            label.set_xy(rlab, bar_index + 11, rv)
+            label.set_text(rlab, "R: " + str.tostring(rv, "#.##"))
+            label.set_textcolor(rlab, color.white)
+            label.set_color(rlab, color.red)
+            label.set_style(rlab, label.style_label_left)
+            label.set_size(rlab, size.small)
+        else
+            line.set_xy1(rl, na, na)
+            line.set_xy2(rl, na, na)
+            label.set_xy(rlab, na, na)
+
+        if not na(sv)
+            line.set_xy1(sl, bar_index - 50, sv)
+            line.set_xy2(sl, bar_index + 10, sv)
+            line.set_color(sl, color.new(color.green, 30))
+            line.set_style(sl, line.style_solid)
+            line.set_width(sl, 1)
+
+            label.set_xy(slab, bar_index + 11, sv)
+            label.set_text(slab, "S: " + str.tostring(sv, "#.##"))
+            label.set_textcolor(slab, color.white)
+            label.set_color(slab, color.green)
+            label.set_style(slab, label.style_label_left)
+            label.set_size(slab, size.small)
+        else
+            line.set_xy1(sl, na, na)
+            line.set_xy2(sl, na, na)
+            label.set_xy(slab, na, na)
+
+// 6. Killzone Background Coloring
+kz_color = in_london ? color.new(color.blue, 96) : in_ny_am ? color.new(color.yellow, 96) : in_ny_pm ? color.new(color.purple, 96) : color.new(color.white, 100)
+bgcolor(show_kz_bg ? kz_color : na)
+
+// 7. S&R Rejection Dots
+plotshape(sr_reject_bear, title="Res Rejection Dot", style=shape.circle, location=location.abovebar, color=color.red, size=size.tiny)
+plotshape(sr_reject_bull, title="Sup Rejection Dot", style=shape.circle, location=location.belowbar, color=color.green, size=size.tiny)
+
+// 8. Info Dashboard (Top Right)
+var table dashboard = table.new(position.top_right, 2, 2, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
+if barstate.islast
+    table.cell(dashboard, 0, 0, "SMC SNIPER", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.black, 30))
+    bias_text = daily_bias == -1 ? "BEARISH" : daily_bias == 1 ? "BULLISH" : "NEUTRAL"
+    bias_color = daily_bias == -1 ? color.red : daily_bias == 1 ? color.green : color.gray
+    table.cell(dashboard, 1, 0, "BIAS: " + bias_text, text_color=bias_color, text_size=size.small, bgcolor=color.new(color.black, 30))
+
+    table.cell(dashboard, 0, 1, "CONFLUENCE", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 1, str.tostring(active_score) + "/8", text_color=active_score >= min_score ? color.green : color.orange, text_size=size.small)
+
+// ── ALERTS ──────────────────────────────────────────────────
+plot(score_bear, "Bear Score", display=display.none)
+plot(score_bull, "Bull Score", display=display.none)
+
+alertcondition(sell_signal, "SMC Sniper — SELL Signal", "SMC Sniper SELL Signal triggered! Score: {{plot_0}}/8")
+alertcondition(buy_signal, "SMC Sniper — BUY Signal", "SMC Sniper BUY Signal triggered! Score: {{plot_1}}/8")
+
+setup_forming = (daily_bias == -1 and score_bear == 5) or (daily_bias == 1 and score_bull == 5)
+alertcondition(setup_forming, "SMC Sniper — Setup Forming", "SMC Sniper Setup Forming. Watch the chart!")
+
+alertcondition(ta.change(daily_bias), "SMC Sniper — CRT Sweep Detected", "Daily CRT Sweep Detected! Bias changed.")
+alertcondition(sr_reject_bear or sr_reject_bull, "SMC Sniper — S&R Rejection", "Major S&R Rejection confirmed!")
