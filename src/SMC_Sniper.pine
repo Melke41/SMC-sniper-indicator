@@ -4,7 +4,7 @@
 // Strategy: CRT Sweep + DFVG + S&R + MSS + OB + Killzones
 // ============================================================
 
-//@version=5
+//@version=6
 indicator("SMC Sniper Indicator", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
 
 // ── USER INPUTS ─────────────────────────────────────────────
@@ -28,6 +28,10 @@ ny_pm_start          = input.int(13, "NY PM Start Hour (UTC)", minval=0, maxval=
 ny_pm_end            = input.int(16, "NY PM End Hour (UTC)", minval=0, maxval=23)
 
 sr_threshold = sr_threshold_pct / 100.0
+
+// ── UTILITY FUNCTIONS ───────────────────────────────────────
+f_changed(val) =>
+    val != val[1] or (na(val) != na(val[1]))
 
 // ── MULTI-TIMEFRAME CALCULATIONS ────────────────────────────
 
@@ -360,7 +364,7 @@ active_score = daily_bias == -1 ? score_bear : daily_bias == 1 ? score_bull : 0
 // ── SIGNALS & TRIGGERING ────────────────────────────────────
 
 var bool trade_taken_today = false
-if ta.change(time("D"))
+if ta.change(time("D")) != 0
     trade_taken_today := false
 
 sell_signal = daily_bias == -1 and score_bear >= min_score and in_killzone and not trade_taken_today and rejection_candle_bear
@@ -380,7 +384,7 @@ if buy_signal
 // 1. Daily DFVG Zone
 var box d_dfvg_box = na
 var int d_dfvg_left = na
-if ta.change(d_bear_bot) or ta.change(d_bear_top) or ta.change(d_bull_bot) or ta.change(d_bull_top)
+if f_changed(d_bear_bot) or f_changed(d_bear_top) or f_changed(d_bull_bot) or f_changed(d_bull_top)
     d_dfvg_left := bar_index
     if not na(d_dfvg_box)
         box.delete(d_dfvg_box)
@@ -409,7 +413,7 @@ if show_d_dfvg
 // 2. 4H FVG Zone
 var box h4_fvg_box = na
 var int h4_fvg_left = na
-if ta.change(h4_fvg_bear_bot) or ta.change(h4_fvg_bear_top) or ta.change(h4_fvg_bull_bot) or ta.change(h4_fvg_bull_top)
+if f_changed(h4_fvg_bear_bot) or f_changed(h4_fvg_bear_top) or f_changed(h4_fvg_bull_bot) or f_changed(h4_fvg_bull_top)
     h4_fvg_left := bar_index
     if not na(h4_fvg_box)
         box.delete(h4_fvg_box)
@@ -438,7 +442,7 @@ if show_4h_fvg
 // 3. 1H OB Zone
 var box h1_ob_box = na
 var int h1_ob_left = na
-if ta.change(h1_ob_bear_bot) or ta.change(h1_ob_bear_top) or ta.change(h1_ob_bull_bot) or ta.change(h1_ob_bull_top)
+if f_changed(h1_ob_bear_bot) or f_changed(h1_ob_bear_top) or f_changed(h1_ob_bull_bot) or f_changed(h1_ob_bull_top)
     h1_ob_left := bar_index
     if not na(h1_ob_box)
         box.delete(h1_ob_box)
@@ -447,14 +451,14 @@ if ta.change(h1_ob_bear_bot) or ta.change(h1_ob_bear_top) or ta.change(h1_ob_bul
 if show_1h_ob
     if daily_bias == -1 and h1_ob_bear_live and not na(h1_ob_bear_top)
         if na(h1_ob_box)
-            h1_ob_box := box.new(left=h1_ob_left, top=h1_ob_bear_top, right=bar_index, bottom=h1_ob_bear_bot, border_color=color.red, border_style=line.style_solid, bgcolor=color.new(color.red, 95), text="1H OB", text_color=color.red, text_size=size.small, text_valign=text.valign_bottom, text_halign=text.halign_left)
+            h1_ob_box := box.new(left=h1_ob_left, top=h1_ob_bear_top, right=bar_index, bottom=h1_ob_bear_bot, border_color=color.red, border_style=line.style_solid, bgcolor=color.new(color.red, 95), text="1H OB", text_color=color.red, text_size=size.small, text_valign="bottom", text_halign="left")
         else
             box.set_right(h1_ob_box, bar_index)
             box.set_top(h1_ob_box, h1_ob_bear_top)
             box.set_bottom(h1_ob_box, h1_ob_bear_bot)
     else if daily_bias == 1 and h1_ob_bull_live and not na(h1_ob_bull_top)
         if na(h1_ob_box)
-            h1_ob_box := box.new(left=h1_ob_left, top=h1_ob_bull_top, right=bar_index, bottom=h1_ob_bull_bot, border_color=color.blue, border_style=line.style_solid, bgcolor=color.new(color.blue, 95), text="1H OB", text_color=color.blue, text_size=size.small, text_valign=text.valign_bottom, text_halign=text.halign_left)
+            h1_ob_box := box.new(left=h1_ob_left, top=h1_ob_bull_top, right=bar_index, bottom=h1_ob_bull_bot, border_color=color.blue, border_style=line.style_solid, bgcolor=color.new(color.blue, 95), text="1H OB", text_color=color.blue, text_size=size.small, text_valign="bottom", text_halign="left")
         else
             box.set_right(h1_ob_box, bar_index)
             box.set_top(h1_ob_box, h1_ob_bull_top)
@@ -467,7 +471,7 @@ if show_1h_ob
 // 4. 30m OB Zone
 var box m30_ob_box = na
 var int m30_ob_left = na
-if ta.change(m30_ob_bear_bot) or ta.change(m30_ob_bear_top) or ta.change(m30_ob_bull_bot) or ta.change(m30_ob_bull_top)
+if f_changed(m30_ob_bear_bot) or f_changed(m30_ob_bear_top) or f_changed(m30_ob_bull_bot) or f_changed(m30_ob_bull_top)
     m30_ob_left := bar_index
     if not na(m30_ob_box)
         box.delete(m30_ob_box)
@@ -476,14 +480,14 @@ if ta.change(m30_ob_bear_bot) or ta.change(m30_ob_bear_top) or ta.change(m30_ob_
 if show_30m_ob
     if daily_bias == -1 and m30_ob_bear_live and not na(m30_ob_bear_top)
         if na(m30_ob_box)
-            m30_ob_box := box.new(left=m30_ob_left, top=m30_ob_bear_top, right=bar_index, bottom=m30_ob_bear_bot, border_color=color.red, border_style=line.style_solid, bgcolor=color.new(color.red, 90), text="30m OB", text_color=color.red, text_size=size.small, text_valign=text.valign_top, text_halign=text.halign_left)
+            m30_ob_box := box.new(left=m30_ob_left, top=m30_ob_bear_top, right=bar_index, bottom=m30_ob_bear_bot, border_color=color.red, border_style=line.style_solid, bgcolor=color.new(color.red, 90), text="30m OB", text_color=color.red, text_size=size.small, text_valign="top", text_halign="left")
         else
             box.set_right(m30_ob_box, bar_index)
             box.set_top(m30_ob_box, m30_ob_bear_top)
             box.set_bottom(m30_ob_box, m30_ob_bear_bot)
     else if daily_bias == 1 and m30_ob_bull_live and not na(m30_ob_bull_top)
         if na(m30_ob_box)
-            m30_ob_box := box.new(left=m30_ob_left, top=m30_ob_bull_top, right=bar_index, bottom=m30_ob_bull_bot, border_color=color.blue, border_style=line.style_solid, bgcolor=color.new(color.blue, 90), text="30m OB", text_color=color.blue, text_size=size.small, text_valign=text.valign_top, text_halign=text.halign_left)
+            m30_ob_box := box.new(left=m30_ob_left, top=m30_ob_bull_top, right=bar_index, bottom=m30_ob_bull_bot, border_color=color.blue, border_style=line.style_solid, bgcolor=color.new(color.blue, 90), text="30m OB", text_color=color.blue, text_size=size.small, text_valign="top", text_halign="left")
         else
             box.set_right(m30_ob_box, bar_index)
             box.set_top(m30_ob_box, m30_ob_bull_top)
@@ -631,5 +635,5 @@ alertcondition(buy_signal, "SMC Sniper — BUY Signal", "SMC Sniper BUY Signal t
 setup_forming = (daily_bias == -1 and (score_bear == 4 or score_bear == 5)) or (daily_bias == 1 and (score_bull == 4 or score_bull == 5))
 alertcondition(setup_forming, "SMC Sniper — Setup Forming", "SMC Sniper Setup Forming. Watch the chart!")
 
-alertcondition(ta.change(daily_bias), "SMC Sniper — CRT Sweep Detected", "Daily CRT Sweep Detected! Bias changed.")
+alertcondition(ta.change(daily_bias) != 0, "SMC Sniper — CRT Sweep Detected", "Daily CRT Sweep Detected! Bias changed.")
 alertcondition(sr_reject_bear or sr_reject_bull, "SMC Sniper — S&R Rejection", "Major S&R Rejection confirmed!")
